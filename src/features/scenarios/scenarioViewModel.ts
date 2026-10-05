@@ -1,14 +1,69 @@
 import type {
   LatencyProject,
+  LedgerBreakdown,
   RequestNode,
   ScenarioSnapshot,
+  SimulationLedger,
   SimulationResult,
 } from "../../shared/domain/types";
+
+export interface LedgerDelta {
+  key: keyof LedgerBreakdown;
+  label: string;
+  baselineMs: number;
+  comparisonMs: number;
+  deltaMs: number;
+}
 
 export interface ScenarioComparison {
   deltaMs: number;
   changes: string[];
   outcome: "faster" | "slower" | "equal";
+  ledgerDelta?: LedgerDelta[];
+}
+
+export const LEDGER_CATEGORY_LABELS: Record<keyof LedgerBreakdown, string> = {
+  baseMs: "基础耗时",
+  jitterMs: "波动影响",
+  timeoutCutMs: "超时截断",
+  retryMs: "期望重试",
+  backoffMs: "退避等待",
+  fallbackMs: "降级加权",
+  queueMs: "资源排队",
+};
+
+const LEDGER_CATEGORY_KEYS = Object.keys(
+  LEDGER_CATEGORY_LABELS,
+) as (keyof LedgerBreakdown)[];
+
+function sumBreakdown(ledger: SimulationLedger): LedgerBreakdown {
+  const totals: LedgerBreakdown = {
+    baseMs: 0,
+    jitterMs: 0,
+    timeoutCutMs: 0,
+    retryMs: 0,
+    backoffMs: 0,
+    fallbackMs: 0,
+    queueMs: 0,
+  };
+  for (const entry of ledger.entries)
+    for (const key of LEDGER_CATEGORY_KEYS) totals[key] += entry.breakdown[key];
+  return totals;
+}
+
+export function compareLedgers(
+  baseline: SimulationLedger,
+  comparison: SimulationLedger,
+): LedgerDelta[] {
+  const before = sumBreakdown(baseline);
+  const after = sumBreakdown(comparison);
+  return LEDGER_CATEGORY_KEYS.map((key) => ({
+    key,
+    label: LEDGER_CATEGORY_LABELS[key],
+    baselineMs: before[key],
+    comparisonMs: after[key],
+    deltaMs: after[key] - before[key],
+  })).sort((a, b) => Math.abs(b.deltaMs) - Math.abs(a.deltaMs));
 }
 
 function describeNodeChanges(
@@ -75,6 +130,9 @@ export function compareScenarios(
         : comparison.completionMs > baseline.completionMs
           ? "slower"
           : "equal",
+    ...(baseline.ledger && comparison.ledger
+      ? { ledgerDelta: compareLedgers(baseline.ledger, comparison.ledger) }
+      : {}),
   };
 }
 
@@ -97,6 +155,7 @@ export function saveScenario(
     nodes: structuredClone(project.nodes),
     completionMs: result.completionMs,
     criticalPath: [...result.criticalPath],
+    ledger: structuredClone(result.ledger),
   };
   return {
     ...project,

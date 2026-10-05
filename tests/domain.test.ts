@@ -99,4 +99,90 @@ describe("request dependency graph", () => {
     expect(next.nodes[0]?.durationMs).toBe(400);
     expect(next.nodes[0]?.dependencyIds).toEqual([]);
   });
+
+  it("itemizes every node's budget and reconciles the ledger with the total", () => {
+    for (const mode of ["low", "expected", "high"] as const) {
+      const result = simulateProject(EXAMPLE_PROJECT, mode);
+      expect(result.ledger.entries).toHaveLength(EXAMPLE_PROJECT.nodes.length);
+      for (const entry of result.ledger.entries) {
+        const timeline = result.entries.find(
+          (item) => item.nodeId === entry.nodeId,
+        );
+        const items = Object.values(entry.breakdown).reduce(
+          (sum, value) => sum + value,
+          0,
+        );
+        expect(items).toBeCloseTo(entry.totalMs, 10);
+        expect(entry.totalMs).toBeCloseTo(
+          (timeline?.modeledDurationMs ?? 0) + (timeline?.waitMs ?? 0),
+          10,
+        );
+        expect(entry.breakdown.queueMs).toBeCloseTo(timeline?.waitMs ?? 0, 10);
+      }
+      expect(result.ledger.criticalDurationMs).toBeCloseTo(
+        result.completionMs,
+        10,
+      );
+    }
+  });
+
+  it("breaks a truncated, retried, degraded node down to exact line items", () => {
+    const node = {
+      id: "a",
+      name: "slow",
+      durationMs: 1200,
+      jitterMs: 400,
+      dependencyIds: [],
+      timeoutMs: 1000,
+      retryCount: 1,
+      failureRate: 50,
+      fallbackNodeId: "b",
+    };
+    const fallback = {
+      ...node,
+      id: "b",
+      name: "fallback",
+      durationMs: 200,
+      jitterMs: 0,
+      timeoutMs: 500,
+      retryCount: 0,
+      failureRate: 0,
+      fallbackNodeId: undefined,
+    };
+    const project = { ...EXAMPLE_PROJECT, nodes: [node, fallback] };
+    const { ledger } = simulateProject(project, "high");
+    const entry = ledger.entries.find((item) => item.nodeId === "a");
+    expect(entry?.breakdown).toEqual({
+      baseMs: 1200,
+      jitterMs: 400,
+      timeoutCutMs: -600,
+      retryMs: 500,
+      backoffMs: 100,
+      fallbackMs: 50,
+      queueMs: 0,
+    });
+    expect(entry?.expectedAttempts).toBeCloseTo(1.5, 10);
+    expect(entry?.terminalFailureRate).toBeCloseTo(0.25, 10);
+    expect(entry?.totalMs).toBe(1650);
+  });
+
+  it("attributes serialization at the concurrency limit to resource queueing", () => {
+    const project = {
+      ...EXAMPLE_PROJECT,
+      concurrencyLimit: 1,
+      nodes: EXAMPLE_PROJECT.nodes.slice(0, 2).map((node) => ({
+        ...node,
+        durationMs: 300,
+        jitterMs: 0,
+        timeoutMs: 1000,
+        retryCount: 0,
+        failureRate: 0,
+      })),
+    };
+    const { ledger, completionMs } = simulateProject(project);
+    expect(completionMs).toBe(600);
+    expect(ledger.entries[0]?.breakdown.queueMs).toBe(0);
+    expect(ledger.entries[1]?.breakdown.queueMs).toBe(300);
+    expect(ledger.criticalDurationMs).toBe(600);
+  });
 });

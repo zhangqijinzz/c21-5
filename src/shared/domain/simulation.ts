@@ -1,28 +1,77 @@
 import { analyzeGraph } from "./graph";
 import type {
   LatencyProject,
+  NodeLedgerEntry,
   RequestNode,
+  SimulationLedger,
   SimulationMode,
   SimulationResult,
   TimelineEntry,
 } from "./types";
 
-function expectedAttempts(node: RequestNode, mode: SimulationMode): number {
-  const jitterFactor = mode === "low" ? 0 : mode === "high" ? 1 : 0.5;
+const JITTER_FACTORS: Record<SimulationMode, number> = {
+  low: 0,
+  expected: 0.5,
+  high: 1,
+};
+
+interface AttemptBreakdown {
+  serviceMs: number;
+  expectedAttempts: number;
+  terminalFailureRate: number;
+  baseMs: number;
+  jitterMs: number;
+  timeoutCutMs: number;
+  retryMs: number;
+  backoffMs: number;
+  totalMs: number;
+}
+
+function breakdownAttempts(
+  node: RequestNode,
+  mode: SimulationMode,
+): AttemptBreakdown {
+  const jitterFactor = JITTER_FACTORS[mode];
+  const jitterMs = node.jitterMs * jitterFactor;
+  const uncappedMs = node.durationMs + jitterMs;
   const serviceMs = Math.min(
-    node.durationMs + node.jitterMs * jitterFactor,
+    uncappedMs,
     node.timeoutMs || Number.POSITIVE_INFINITY,
   );
   const failure = node.failureRate / 100;
-  let elapsed = 0;
+  let retryMs = 0;
+  let backoffMs = 0;
+  let expectedAttempts = 0;
   let priorFailures = 1;
   for (let attempt = 0; attempt <= node.retryCount; attempt += 1) {
-    elapsed += priorFailures * serviceMs;
+    expectedAttempts += priorFailures;
+    if (attempt > 0) retryMs += priorFailures * serviceMs;
     priorFailures *= failure;
     if (attempt < node.retryCount)
-      elapsed += priorFailures * Math.min(200 * 2 ** attempt, 2_000);
+      backoffMs += priorFailures * Math.min(200 * 2 ** attempt, 2_000);
   }
-  return elapsed;
+  return {
+    serviceMs,
+    expectedAttempts,
+    terminalFailureRate: priorFailures,
+    baseMs: node.durationMs,
+    jitterMs,
+    timeoutCutMs: serviceMs - uncappedMs,
+    retryMs,
+    backoffMs,
+    totalMs: serviceMs * expectedAttempts + backoffMs,
+  };
+}
+
+function emptyLedger(mode: SimulationMode): SimulationLedger {
+  return {
+    mode,
+    jitterFactor: JITTER_FACTORS[mode],
+    entries: [],
+    completionMs: 0,
+    criticalPath: [],
+    criticalDurationMs: 0,
+  };
 }
 
 export function simulateProject(
@@ -37,25 +86,28 @@ export function simulateProject(
       criticalPath: [],
       entries: [],
       warnings: analysis.validation.errors,
+      ledger: emptyLedger(mode),
     };
   }
 
   const byId = new Map(project.nodes.map((node) => [node.id, node]));
+  const attempts = new Map(
+    project.nodes.map((node) => [node.id, breakdownAttempts(node, mode)]),
+  );
   const baseDurations = new Map(
-    project.nodes.map((node) => [node.id, expectedAttempts(node, mode)]),
+    project.nodes.map((node) => [node.id, attempts.get(node.id)?.totalMs ?? 0]),
   );
   const durations = new Map(baseDurations);
+  const fallbackWeights = new Map<string, number>();
   for (const node of project.nodes) {
     const fallback = node.fallbackNodeId
       ? byId.get(node.fallbackNodeId)
       : undefined;
     if (fallback) {
-      const terminalFailure = (node.failureRate / 100) ** (node.retryCount + 1);
-      durations.set(
-        node.id,
-        (durations.get(node.id) ?? 0) +
-          (baseDurations.get(fallback.id) ?? 0) * terminalFailure,
-      );
+      const terminalFailure = attempts.get(node.id)?.terminalFailureRate ?? 0;
+      const weighted = (baseDurations.get(fallback.id) ?? 0) * terminalFailure;
+      fallbackWeights.set(node.id, weighted);
+      durations.set(node.id, (durations.get(node.id) ?? 0) + weighted);
     }
   }
 
@@ -70,6 +122,7 @@ export function simulateProject(
     }),
   );
   const entries: TimelineEntry[] = [];
+  const ledgerEntries: NodeLedgerEntry[] = [];
   for (const id of analysis.order) {
     const node = byId.get(id);
     if (!node) continue;
@@ -96,21 +149,38 @@ export function simulateProject(
       : latestDependency?.nodeId;
     const modeledDurationMs = durations.get(id) ?? 0;
     const endMs = startMs + modeledDurationMs;
+    const waitMs = Math.max(
+      0,
+      startMs -
+        dependencyEntries.reduce((end, entry) => Math.max(end, entry.endMs), 0),
+    );
     entries.push({
       nodeId: id,
       startMs,
       endMs,
       modeledDurationMs,
-      waitMs: Math.max(
-        0,
-        startMs -
-          dependencyEntries.reduce(
-            (end, entry) => Math.max(end, entry.endMs),
-            0,
-          ),
-      ),
+      waitMs,
       ...(predecessor ? { criticalPredecessorId: predecessor } : {}),
     });
+    const attempt = attempts.get(id);
+    if (attempt) {
+      ledgerEntries.push({
+        nodeId: id,
+        serviceMs: attempt.serviceMs,
+        expectedAttempts: attempt.expectedAttempts,
+        terminalFailureRate: attempt.terminalFailureRate,
+        breakdown: {
+          baseMs: attempt.baseMs,
+          jitterMs: attempt.jitterMs,
+          timeoutCutMs: attempt.timeoutCutMs,
+          retryMs: attempt.retryMs,
+          backoffMs: attempt.backoffMs,
+          fallbackMs: fallbackWeights.get(id) ?? 0,
+          queueMs: waitMs,
+        },
+        totalMs: modeledDurationMs + waitMs,
+      });
+    }
     slot.endMs = endMs;
     slot.nodeId = id;
   }
@@ -127,24 +197,47 @@ export function simulateProject(
         : []),
       entry.nodeId,
     ]);
+  const criticalPath = lastEntry ? (pathById.get(lastEntry.nodeId) ?? []) : [];
+  const ledgerById = new Map(
+    ledgerEntries.map((entry) => [entry.nodeId, entry]),
+  );
+  const criticalDurationMs = criticalPath.reduce((sum, id) => {
+    const breakdown = ledgerById.get(id)?.breakdown;
+    if (!breakdown) return sum;
+    return (
+      sum +
+      breakdown.baseMs +
+      breakdown.jitterMs +
+      breakdown.timeoutCutMs +
+      breakdown.retryMs +
+      breakdown.backoffMs +
+      breakdown.fallbackMs
+    );
+  }, 0);
   const warnings = [...analysis.validation.warnings];
   if (
     project.nodes.some(
       (node) =>
         node.timeoutMs > 0 &&
-        node.durationMs +
-          node.jitterMs *
-            (mode === "high" ? 1 : mode === "expected" ? 0.5 : 0) >
-          node.timeoutMs,
+        node.durationMs + node.jitterMs * JITTER_FACTORS[mode] > node.timeoutMs,
     )
   ) {
     warnings.push("部分节点会触发超时截断，已计入重试与退避预算");
   }
+  const completionMs = lastEntry?.endMs ?? 0;
   return {
     mode,
-    completionMs: lastEntry?.endMs ?? 0,
-    criticalPath: lastEntry ? (pathById.get(lastEntry.nodeId) ?? []) : [],
+    completionMs,
+    criticalPath,
     entries,
     warnings,
+    ledger: {
+      mode,
+      jitterFactor: JITTER_FACTORS[mode],
+      entries: ledgerEntries,
+      completionMs,
+      criticalPath,
+      criticalDurationMs,
+    },
   };
 }

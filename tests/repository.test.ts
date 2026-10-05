@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { ProjectRepository } from "../src/shared/repositories/projectRepository";
+import { simulateProject } from "../src/shared/domain/simulation";
+import { saveScenario } from "../src/features/scenarios/scenarioViewModel";
 import {
   EXAMPLE_PROJECT,
   type WorkspaceDocument,
@@ -85,5 +87,63 @@ describe("project repository recovery", () => {
     const loaded = await repository.load();
     expect(loaded.document.projects[0]?.id).toBe(EXAMPLE_PROJECT.id);
     expect(loaded.recovered).toBe(true);
+  });
+
+  it("loads legacy snapshots without ledger data and drops malformed ledgers only", async () => {
+    const storage = new MemoryStorage();
+    const scenarioBase = {
+      id: "scenario-1",
+      name: "旧方案",
+      createdAt: 1_728_000_000_000,
+      concurrencyLimit: null,
+      nodes: structuredClone(EXAMPLE_PROJECT.nodes),
+      completionMs: 1200,
+      criticalPath: ["session"],
+    };
+    storage.value = {
+      version: 1,
+      activeProjectId: EXAMPLE_PROJECT.id,
+      projects: [
+        {
+          ...structuredClone(EXAMPLE_PROJECT),
+          scenarios: [
+            scenarioBase,
+            {
+              ...scenarioBase,
+              id: "scenario-2",
+              name: "明细损坏的方案",
+              ledger: { mode: "expected", entries: [{ nodeId: 7 }] },
+            },
+          ],
+        },
+      ],
+    };
+    const loaded = await new ProjectRepository(storage).load();
+    const scenarios = loaded.document.projects[0]?.scenarios;
+    expect(scenarios).toHaveLength(2);
+    expect(scenarios?.[0]?.completionMs).toBe(1200);
+    expect(scenarios?.[0]?.ledger).toBeUndefined();
+    expect(scenarios?.[1]?.ledger).toBeUndefined();
+  });
+
+  it("round-trips snapshots together with their ledger breakdown", async () => {
+    const storage = new MemoryStorage();
+    const repository = new ProjectRepository(storage);
+    const project = structuredClone(EXAMPLE_PROJECT);
+    const result = simulateProject(project);
+    const withScenario = saveScenario(project, result, "带账本");
+    const document: WorkspaceDocument = {
+      version: 1,
+      activeProjectId: project.id,
+      projects: [withScenario],
+    };
+    await repository.save(document);
+    const loaded = await repository.load();
+    const scenario = loaded.document.projects[0]?.scenarios[0];
+    expect(scenario?.ledger?.entries).toHaveLength(project.nodes.length);
+    expect(scenario?.ledger?.criticalDurationMs).toBeCloseTo(
+      scenario?.completionMs ?? Number.NaN,
+      10,
+    );
   });
 });

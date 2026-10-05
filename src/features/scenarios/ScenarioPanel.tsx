@@ -155,6 +155,46 @@ export default function ScenarioPanel({
               </article>
             </div>
           )}
+          {baseline && comparison && (
+            <div className="ledger-delta-card">
+              <div className="snapshot-heading">
+                <span className="section-label">预算构成差异</span>
+                <span>对照 − 基准</span>
+              </div>
+              {comparisonResult?.ledgerDelta ? (
+                <>
+                  {comparisonResult.ledgerDelta.map((item) => (
+                    <div className="ledger-delta-row" key={item.key}>
+                      <span className="ledger-delta-label">{item.label}</span>
+                      <span className="ledger-delta-values">
+                        {formatDuration(item.baselineMs)} →{" "}
+                        {formatDuration(item.comparisonMs)}
+                      </span>
+                      <b
+                        className={
+                          item.deltaMs > 0
+                            ? "delta-bad"
+                            : item.deltaMs < 0
+                              ? "delta-good"
+                              : "delta-flat"
+                        }
+                      >
+                        {item.deltaMs > 0 ? "+" : item.deltaMs < 0 ? "−" : ""}
+                        {formatDuration(Math.abs(item.deltaMs))}
+                      </b>
+                    </div>
+                  ))}
+                  <p className="ledger-delta-hint">
+                    正值表示该项把对照方案的预算推高；节点级明细见各快照保存时的耗时账本。
+                  </p>
+                </>
+              ) : (
+                <p className="ledger-delta-hint ledger-delta-missing">
+                  至少一份快照保存于账本功能之前，缺少逐项明细；完成时间与参数差异不受影响，重新保存快照即可生成账本。
+                </p>
+              )}
+            </div>
+          )}
           <div className="snapshot-list">
             <div className="snapshot-heading">
               <span className="section-label">已保存快照</span>

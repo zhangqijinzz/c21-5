@@ -12,6 +12,7 @@ import type {
   SimulationResult,
 } from "../../shared/domain/types";
 import Timeline from "./Timeline";
+import LedgerTable from "./LedgerTable";
 
 interface Props {
   project: LatencyProject;
@@ -160,6 +161,7 @@ export default function SimulationPanel({
         </article>
       </div>
       <Timeline project={project} result={result} />
+      <LedgerTable project={project} ledger={result.ledger} />
       <div className="model-footnote">
         耗时 = 截断后的请求耗时 × 失败重试概率 +
         指数退避；降级开销按最终失败概率加权。并发上限会计入资源排队。

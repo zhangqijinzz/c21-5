@@ -1,8 +1,11 @@
 import {
   EXAMPLE_PROJECT,
   type LatencyProject,
+  type LedgerBreakdown,
+  type NodeLedgerEntry,
   type RequestNode,
   type ScenarioSnapshot,
+  type SimulationLedger,
   type WorkspaceDocument,
 } from "../domain/types";
 import { IndexedDbService } from "../services/indexedDbService";
@@ -59,6 +62,93 @@ function parseNode(value: unknown): RequestNode | undefined {
   };
 }
 
+function parseBreakdown(value: unknown): LedgerBreakdown | undefined {
+  if (!isRecord(value)) return undefined;
+  const {
+    baseMs,
+    jitterMs,
+    timeoutCutMs,
+    retryMs,
+    backoffMs,
+    fallbackMs,
+    queueMs,
+  } = value;
+  if (
+    !isFiniteNumber(baseMs) ||
+    !isFiniteNumber(jitterMs) ||
+    !isFiniteNumber(timeoutCutMs) ||
+    !isFiniteNumber(retryMs) ||
+    !isFiniteNumber(backoffMs) ||
+    !isFiniteNumber(fallbackMs) ||
+    !isFiniteNumber(queueMs)
+  )
+    return undefined;
+  return {
+    baseMs,
+    jitterMs,
+    timeoutCutMs,
+    retryMs,
+    backoffMs,
+    fallbackMs,
+    queueMs,
+  };
+}
+
+function parseLedgerEntry(value: unknown): NodeLedgerEntry | undefined {
+  if (!isRecord(value) || typeof value.nodeId !== "string") return undefined;
+  const { nodeId, serviceMs, expectedAttempts, terminalFailureRate, totalMs } =
+    value;
+  if (
+    !isFiniteNumber(serviceMs) ||
+    !isFiniteNumber(expectedAttempts) ||
+    !isFiniteNumber(terminalFailureRate) ||
+    !isFiniteNumber(totalMs)
+  )
+    return undefined;
+  const breakdown = parseBreakdown(value.breakdown);
+  if (!breakdown) return undefined;
+  return {
+    nodeId,
+    serviceMs,
+    expectedAttempts,
+    terminalFailureRate,
+    breakdown,
+    totalMs,
+  };
+}
+
+function parseLedger(value: unknown): SimulationLedger | undefined {
+  if (
+    !isRecord(value) ||
+    !Array.isArray(value.entries) ||
+    !Array.isArray(value.criticalPath)
+  )
+    return undefined;
+  const { mode, jitterFactor, completionMs, criticalDurationMs } = value;
+  if (mode !== "low" && mode !== "expected" && mode !== "high")
+    return undefined;
+  if (
+    !isFiniteNumber(jitterFactor) ||
+    !isFiniteNumber(completionMs) ||
+    !isFiniteNumber(criticalDurationMs)
+  )
+    return undefined;
+  const entries = value.entries
+    .map(parseLedgerEntry)
+    .filter((entry): entry is NodeLedgerEntry => Boolean(entry));
+  if (entries.length !== value.entries.length) return undefined;
+  return {
+    mode,
+    jitterFactor,
+    completionMs,
+    criticalDurationMs,
+    criticalPath: value.criticalPath.filter(
+      (id): id is string => typeof id === "string",
+    ),
+    entries,
+  };
+}
+
 function parseScenario(value: unknown): ScenarioSnapshot | undefined {
   if (
     !isRecord(value) ||
@@ -74,6 +164,7 @@ function parseScenario(value: unknown): ScenarioSnapshot | undefined {
     typeof completionMs !== "number"
   )
     return undefined;
+  const ledger = parseLedger(value.ledger);
   return {
     id,
     name,
@@ -89,6 +180,7 @@ function parseScenario(value: unknown): ScenarioSnapshot | undefined {
     criticalPath: value.criticalPath.filter(
       (id): id is string => typeof id === "string",
     ),
+    ...(ledger ? { ledger } : {}),
   };
 }
 
