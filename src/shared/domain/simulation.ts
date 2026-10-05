@@ -1,28 +1,63 @@
 import { analyzeGraph } from "./graph";
 import type {
   LatencyProject,
+  NodeLedgerEntry,
   RequestNode,
   SimulationMode,
   SimulationResult,
   TimelineEntry,
 } from "./types";
 
-function expectedAttempts(node: RequestNode, mode: SimulationMode): number {
+interface AttemptBreakdown {
+  serviceMs: number;
+  baseMs: number;
+  jitterMs: number;
+  timeoutTruncationMs: number;
+  expectedAttempts: number;
+  retryMs: number;
+  backoffMs: number;
+  totalMs: number;
+}
+
+function breakdownAttempts(
+  node: RequestNode,
+  mode: SimulationMode,
+): AttemptBreakdown {
   const jitterFactor = mode === "low" ? 0 : mode === "high" ? 1 : 0.5;
+  const jitterMs = node.jitterMs * jitterFactor;
+  const rawMs = node.durationMs + jitterMs;
   const serviceMs = Math.min(
-    node.durationMs + node.jitterMs * jitterFactor,
+    rawMs,
     node.timeoutMs || Number.POSITIVE_INFINITY,
   );
   const failure = node.failureRate / 100;
-  let elapsed = 0;
+  let totalMs = 0;
+  let attemptMs = 0;
+  let backoffMs = 0;
+  let expectedAttempts = 0;
   let priorFailures = 1;
   for (let attempt = 0; attempt <= node.retryCount; attempt += 1) {
-    elapsed += priorFailures * serviceMs;
+    const attemptCost = priorFailures * serviceMs;
+    totalMs += attemptCost;
+    attemptMs += attemptCost;
+    expectedAttempts += priorFailures;
     priorFailures *= failure;
-    if (attempt < node.retryCount)
-      elapsed += priorFailures * Math.min(200 * 2 ** attempt, 2_000);
+    if (attempt < node.retryCount) {
+      const backoffCost = priorFailures * Math.min(200 * 2 ** attempt, 2_000);
+      totalMs += backoffCost;
+      backoffMs += backoffCost;
+    }
   }
-  return elapsed;
+  return {
+    serviceMs,
+    baseMs: node.durationMs,
+    jitterMs,
+    timeoutTruncationMs: serviceMs - rawMs,
+    expectedAttempts,
+    retryMs: attemptMs - serviceMs,
+    backoffMs,
+    totalMs,
+  };
 }
 
 export function simulateProject(
@@ -36,26 +71,32 @@ export function simulateProject(
       completionMs: 0,
       criticalPath: [],
       entries: [],
+      ledger: [],
       warnings: analysis.validation.errors,
     };
   }
 
   const byId = new Map(project.nodes.map((node) => [node.id, node]));
-  const baseDurations = new Map(
-    project.nodes.map((node) => [node.id, expectedAttempts(node, mode)]),
+  const breakdowns = new Map(
+    project.nodes.map((node) => [node.id, breakdownAttempts(node, mode)]),
   );
-  const durations = new Map(baseDurations);
+  const durations = new Map(
+    project.nodes.map((node) => [
+      node.id,
+      breakdowns.get(node.id)?.totalMs ?? 0,
+    ]),
+  );
+  const fallbackWeights = new Map<string, number>();
   for (const node of project.nodes) {
     const fallback = node.fallbackNodeId
       ? byId.get(node.fallbackNodeId)
       : undefined;
     if (fallback) {
       const terminalFailure = (node.failureRate / 100) ** (node.retryCount + 1);
-      durations.set(
-        node.id,
-        (durations.get(node.id) ?? 0) +
-          (baseDurations.get(fallback.id) ?? 0) * terminalFailure,
-      );
+      const weighted =
+        (breakdowns.get(fallback.id)?.totalMs ?? 0) * terminalFailure;
+      fallbackWeights.set(node.id, weighted);
+      durations.set(node.id, (durations.get(node.id) ?? 0) + weighted);
     }
   }
 
@@ -70,6 +111,7 @@ export function simulateProject(
     }),
   );
   const entries: TimelineEntry[] = [];
+  const ledger: NodeLedgerEntry[] = [];
   for (const id of analysis.order) {
     const node = byId.get(id);
     if (!node) continue;
@@ -96,21 +138,37 @@ export function simulateProject(
       : latestDependency?.nodeId;
     const modeledDurationMs = durations.get(id) ?? 0;
     const endMs = startMs + modeledDurationMs;
+    const waitMs = Math.max(
+      0,
+      startMs -
+        dependencyEntries.reduce(
+          (end, entry) => Math.max(end, entry.endMs),
+          0,
+        ),
+    );
     entries.push({
       nodeId: id,
       startMs,
       endMs,
       modeledDurationMs,
-      waitMs: Math.max(
-        0,
-        startMs -
-          dependencyEntries.reduce(
-            (end, entry) => Math.max(end, entry.endMs),
-            0,
-          ),
-      ),
+      waitMs,
       ...(predecessor ? { criticalPredecessorId: predecessor } : {}),
     });
+    const breakdown = breakdowns.get(id);
+    if (breakdown) {
+      ledger.push({
+        nodeId: id,
+        baseMs: breakdown.baseMs,
+        jitterMs: breakdown.jitterMs,
+        timeoutTruncationMs: breakdown.timeoutTruncationMs,
+        expectedAttempts: breakdown.expectedAttempts,
+        retryMs: breakdown.retryMs,
+        backoffMs: breakdown.backoffMs,
+        fallbackMs: fallbackWeights.get(id) ?? 0,
+        queueMs: waitMs,
+        totalMs: modeledDurationMs + waitMs,
+      });
+    }
     slot.endMs = endMs;
     slot.nodeId = id;
   }
@@ -145,6 +203,7 @@ export function simulateProject(
     completionMs: lastEntry?.endMs ?? 0,
     criticalPath: lastEntry ? (pathById.get(lastEntry.nodeId) ?? []) : [],
     entries,
+    ledger,
     warnings,
   };
 }

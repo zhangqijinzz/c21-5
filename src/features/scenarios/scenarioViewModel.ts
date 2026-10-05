@@ -1,14 +1,57 @@
 import type {
   LatencyProject,
+  NodeLedgerEntry,
   RequestNode,
   ScenarioSnapshot,
   SimulationResult,
 } from "../../shared/domain/types";
 
+export const LEDGER_CATEGORIES = [
+  { key: "baseMs", label: "基础耗时" },
+  { key: "jitterMs", label: "波动影响" },
+  { key: "timeoutTruncationMs", label: "超时截断" },
+  { key: "retryMs", label: "期望重试" },
+  { key: "backoffMs", label: "退避等待" },
+  { key: "fallbackMs", label: "降级加权" },
+  { key: "queueMs", label: "资源排队" },
+] as const;
+
+export type LedgerCategoryKey = (typeof LEDGER_CATEGORIES)[number]["key"];
+
+export interface LedgerShift {
+  key: LedgerCategoryKey;
+  label: string;
+  baselineMs: number;
+  comparisonMs: number;
+  deltaMs: number;
+}
+
 export interface ScenarioComparison {
   deltaMs: number;
   changes: string[];
   outcome: "faster" | "slower" | "equal";
+  ledgerShift?: LedgerShift[];
+}
+
+function sumCategory(
+  entries: NodeLedgerEntry[],
+  key: LedgerCategoryKey,
+): number {
+  return entries.reduce((sum, entry) => sum + entry[key], 0);
+}
+
+export function summarizeLedger(
+  snapshot: ScenarioSnapshot,
+): Record<LedgerCategoryKey, number> | undefined {
+  if (!snapshot.ledger?.length) return undefined;
+  const critical = new Set(snapshot.criticalPath);
+  const onCriticalPath = snapshot.ledger.filter((entry) =>
+    critical.has(entry.nodeId),
+  );
+  const entries = onCriticalPath.length ? onCriticalPath : snapshot.ledger;
+  return Object.fromEntries(
+    LEDGER_CATEGORIES.map(({ key }) => [key, sumCategory(entries, key)]),
+  ) as Record<LedgerCategoryKey, number>;
 }
 
 function describeNodeChanges(
@@ -66,6 +109,18 @@ export function compareScenarios(
     changes.unshift(
       `并发上限 · ${baseline.concurrencyLimit ?? "不限"} → ${comparison.concurrencyLimit ?? "不限"}`,
     );
+  const baselineLedger = summarizeLedger(baseline);
+  const comparisonLedger = summarizeLedger(comparison);
+  const ledgerShift =
+    baselineLedger && comparisonLedger
+      ? LEDGER_CATEGORIES.map(({ key, label }) => ({
+          key,
+          label,
+          baselineMs: baselineLedger[key],
+          comparisonMs: comparisonLedger[key],
+          deltaMs: comparisonLedger[key] - baselineLedger[key],
+        }))
+      : undefined;
   return {
     deltaMs: comparison.completionMs - baseline.completionMs,
     changes,
@@ -75,6 +130,7 @@ export function compareScenarios(
         : comparison.completionMs > baseline.completionMs
           ? "slower"
           : "equal",
+    ...(ledgerShift ? { ledgerShift } : {}),
   };
 }
 
@@ -97,6 +153,7 @@ export function saveScenario(
     nodes: structuredClone(project.nodes),
     completionMs: result.completionMs,
     criticalPath: [...result.criticalPath],
+    ledger: structuredClone(result.ledger),
   };
   return {
     ...project,

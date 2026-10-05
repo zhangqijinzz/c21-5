@@ -1,6 +1,7 @@
 import {
   EXAMPLE_PROJECT,
   type LatencyProject,
+  type NodeLedgerEntry,
   type RequestNode,
   type ScenarioSnapshot,
   type WorkspaceDocument,
@@ -59,6 +60,54 @@ function parseNode(value: unknown): RequestNode | undefined {
   };
 }
 
+function parseLedgerEntry(value: unknown): NodeLedgerEntry | undefined {
+  if (!isRecord(value) || typeof value.nodeId !== "string") return undefined;
+  const {
+    nodeId,
+    baseMs,
+    jitterMs,
+    timeoutTruncationMs,
+    expectedAttempts,
+    retryMs,
+    backoffMs,
+    fallbackMs,
+    queueMs,
+    totalMs,
+  } = value;
+  if (
+    !isFiniteNumber(baseMs) ||
+    !isFiniteNumber(jitterMs) ||
+    !isFiniteNumber(timeoutTruncationMs) ||
+    !isFiniteNumber(expectedAttempts) ||
+    !isFiniteNumber(retryMs) ||
+    !isFiniteNumber(backoffMs) ||
+    !isFiniteNumber(fallbackMs) ||
+    !isFiniteNumber(queueMs) ||
+    !isFiniteNumber(totalMs)
+  )
+    return undefined;
+  return {
+    nodeId,
+    baseMs,
+    jitterMs,
+    timeoutTruncationMs,
+    expectedAttempts,
+    retryMs,
+    backoffMs,
+    fallbackMs,
+    queueMs,
+    totalMs,
+  };
+}
+
+function parseLedger(value: unknown): NodeLedgerEntry[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const entries = value
+    .map(parseLedgerEntry)
+    .filter((entry): entry is NodeLedgerEntry => Boolean(entry));
+  return entries.length ? entries : undefined;
+}
+
 function parseScenario(value: unknown): ScenarioSnapshot | undefined {
   if (
     !isRecord(value) ||
@@ -74,6 +123,7 @@ function parseScenario(value: unknown): ScenarioSnapshot | undefined {
     typeof completionMs !== "number"
   )
     return undefined;
+  const ledger = parseLedger(value.ledger);
   return {
     id,
     name,
@@ -89,6 +139,7 @@ function parseScenario(value: unknown): ScenarioSnapshot | undefined {
     criticalPath: value.criticalPath.filter(
       (id): id is string => typeof id === "string",
     ),
+    ...(ledger ? { ledger } : {}),
   };
 }
 

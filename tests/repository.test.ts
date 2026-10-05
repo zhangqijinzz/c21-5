@@ -86,4 +86,63 @@ describe("project repository recovery", () => {
     expect(loaded.document.projects[0]?.id).toBe(EXAMPLE_PROJECT.id);
     expect(loaded.recovered).toBe(true);
   });
+
+  it("loads legacy snapshots without ledger and keeps ledgered ones intact", async () => {
+    const storage = new MemoryStorage();
+    const ledgerRow = {
+      nodeId: EXAMPLE_PROJECT.nodes[0]?.id ?? "session",
+      baseMs: 280,
+      jitterMs: 40,
+      timeoutTruncationMs: 0,
+      expectedAttempts: 1.01,
+      retryMs: 3.2,
+      backoffMs: 2,
+      fallbackMs: 0,
+      queueMs: 0,
+      totalMs: 325.2,
+    };
+    storage.value = {
+      version: 1,
+      activeProjectId: EXAMPLE_PROJECT.id,
+      projects: [
+        {
+          ...structuredClone(EXAMPLE_PROJECT),
+          scenarios: [
+            {
+              id: "legacy",
+              name: "旧快照",
+              createdAt: 1_728_000_000_000,
+              concurrencyLimit: null,
+              nodes: structuredClone(EXAMPLE_PROJECT.nodes),
+              completionMs: 1200,
+              criticalPath: [EXAMPLE_PROJECT.nodes[0]?.id],
+            },
+            {
+              id: "ledgered",
+              name: "新快照",
+              createdAt: 1_728_000_100_000,
+              concurrencyLimit: 2,
+              nodes: structuredClone(EXAMPLE_PROJECT.nodes),
+              completionMs: 900,
+              criticalPath: [EXAMPLE_PROJECT.nodes[0]?.id],
+              ledger: [ledgerRow, { broken: true }],
+            },
+          ],
+        },
+      ],
+    };
+    const loaded = await new ProjectRepository(storage).load();
+    const scenarios = loaded.document.projects[0]?.scenarios ?? [];
+    expect(scenarios).toHaveLength(2);
+    expect(scenarios[0]?.name).toBe("旧快照");
+    expect(scenarios[0]?.ledger).toBeUndefined();
+    expect(scenarios[0]?.completionMs).toBe(1200);
+    expect(scenarios[1]?.ledger).toHaveLength(1);
+    expect(scenarios[1]?.ledger?.[0]).toMatchObject({
+      nodeId: ledgerRow.nodeId,
+      baseMs: 280,
+      queueMs: 0,
+      totalMs: 325.2,
+    });
+  });
 });

@@ -10,6 +10,19 @@ export interface RequestNode {
   fallbackNodeId?: string;
 }
 
+export interface NodeLedgerEntry {
+  nodeId: string;
+  baseMs: number;
+  jitterMs: number;
+  timeoutTruncationMs: number;
+  expectedAttempts: number;
+  retryMs: number;
+  backoffMs: number;
+  fallbackMs: number;
+  queueMs: number;
+  totalMs: number;
+}
+
 export interface ScenarioSnapshot {
   id: string;
   name: string;
@@ -18,6 +31,7 @@ export interface ScenarioSnapshot {
   nodes: RequestNode[];
   completionMs: number;
   criticalPath: string[];
+  ledger?: NodeLedgerEntry[];
 }
 
 export interface LatencyProject {
@@ -52,6 +66,7 @@ export interface SimulationResult {
   completionMs: number;
   criticalPath: string[];
   entries: TimelineEntry[];
+  ledger: NodeLedgerEntry[];
   warnings: string[];
 }
 

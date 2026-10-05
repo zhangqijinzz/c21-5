@@ -99,4 +99,110 @@ describe("request dependency graph", () => {
     expect(next.nodes[0]?.durationMs).toBe(400);
     expect(next.nodes[0]?.dependencyIds).toEqual([]);
   });
+
+  it("reconciles every ledger row with the modeled duration and total budget", () => {
+    const result = simulateProject(EXAMPLE_PROJECT, "expected");
+    expect(result.ledger).toHaveLength(EXAMPLE_PROJECT.nodes.length);
+    for (const entry of result.entries) {
+      const row = result.ledger.find((item) => item.nodeId === entry.nodeId);
+      expect(row).toBeDefined();
+      if (!row) continue;
+      const executionMs =
+        row.baseMs +
+        row.jitterMs +
+        row.timeoutTruncationMs +
+        row.retryMs +
+        row.backoffMs +
+        row.fallbackMs;
+      expect(executionMs).toBeCloseTo(entry.modeledDurationMs, 8);
+      expect(row.queueMs).toBe(entry.waitMs);
+      expect(row.totalMs).toBeCloseTo(
+        entry.modeledDurationMs + entry.waitMs,
+        8,
+      );
+    }
+    const critical = new Set(result.criticalPath);
+    const criticalExecution = result.ledger
+      .filter((row) => critical.has(row.nodeId))
+      .reduce((sum, row) => sum + row.totalMs - row.queueMs, 0);
+    expect(criticalExecution).toBeCloseTo(result.completionMs, 8);
+  });
+
+  it("attributes truncation, retries, backoff and fallback to node parameters", () => {
+    const node = {
+      id: "a",
+      name: "slow",
+      durationMs: 1200,
+      jitterMs: 400,
+      dependencyIds: [],
+      timeoutMs: 1000,
+      retryCount: 1,
+      failureRate: 50,
+      fallbackNodeId: "b",
+    };
+    const fallback = {
+      ...node,
+      id: "b",
+      name: "fallback",
+      durationMs: 200,
+      jitterMs: 0,
+      timeoutMs: 500,
+      retryCount: 0,
+      failureRate: 0,
+      fallbackNodeId: undefined,
+    };
+    const result = simulateProject(
+      { ...EXAMPLE_PROJECT, nodes: [node, fallback] },
+      "high",
+    );
+    const row = result.ledger.find((item) => item.nodeId === "a");
+    expect(row).toMatchObject({
+      baseMs: 1200,
+      jitterMs: 400,
+      timeoutTruncationMs: -600,
+      retryMs: 500,
+      backoffMs: 100,
+      fallbackMs: 50,
+      queueMs: 0,
+    });
+    expect(row?.expectedAttempts).toBeCloseTo(1.5, 8);
+    expect(row?.totalMs).toBeCloseTo(1650, 8);
+  });
+
+  it("books resource queueing separately from the critical path execution sum", () => {
+    const project = {
+      ...EXAMPLE_PROJECT,
+      concurrencyLimit: 1,
+      nodes: EXAMPLE_PROJECT.nodes.slice(0, 2).map((node) => ({
+        ...node,
+        durationMs: 300,
+        jitterMs: 0,
+        timeoutMs: 1000,
+        retryCount: 0,
+        failureRate: 0,
+        dependencyIds: [],
+        fallbackNodeId: undefined,
+      })),
+    };
+    const result = simulateProject(project);
+    expect(result.completionMs).toBe(600);
+    const queued = result.ledger.filter((row) => row.queueMs > 0);
+    expect(queued).toHaveLength(1);
+    expect(queued[0]?.queueMs).toBe(300);
+    const critical = new Set(result.criticalPath);
+    const execution = result.ledger
+      .filter((row) => critical.has(row.nodeId))
+      .reduce(
+        (sum, row) =>
+          sum +
+          row.baseMs +
+          row.jitterMs +
+          row.timeoutTruncationMs +
+          row.retryMs +
+          row.backoffMs +
+          row.fallbackMs,
+        0,
+      );
+    expect(execution).toBeCloseTo(result.completionMs, 8);
+  });
 });

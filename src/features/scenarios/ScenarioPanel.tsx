@@ -31,6 +31,13 @@ function formatDuration(value: number): string {
     : `${(value / 1000).toFixed(2)} s`;
 }
 
+function formatDelta(value: number): string {
+  if (Math.abs(value) < 0.05) return "0 ms";
+  const rounded = Math.round(Math.abs(value) * 10) / 10;
+  const text = Number.isInteger(rounded) ? `${rounded}` : rounded.toFixed(1);
+  return `${value > 0 ? "+" : "-"}${text} ms`;
+}
+
 export default function ScenarioPanel({
   project,
   onSave,
@@ -153,6 +160,66 @@ export default function ScenarioPanel({
                   {comparison.name} · {comparison.nodes.length} 节点
                 </small>
               </article>
+            </div>
+          )}
+          {baseline && comparison && (
+            <div className="ledger-shift">
+              <div className="snapshot-heading">
+                <span className="section-label">预算构成对比</span>
+                <span>关键路径分项 · 哪几项推高了预算</span>
+              </div>
+              {comparisonResult?.ledgerShift ? (
+                <>
+                  <div className="ledger-shift-row ledger-shift-head">
+                    <span>分项</span>
+                    <span>基准</span>
+                    <span>对照</span>
+                    <span>差异</span>
+                  </div>
+                  {comparisonResult.ledgerShift.map((shift) => (
+                    <div className="ledger-shift-row" key={shift.key}>
+                      <span>{shift.label}</span>
+                      <span>{formatDuration(shift.baselineMs)}</span>
+                      <span>{formatDuration(shift.comparisonMs)}</span>
+                      <span
+                        className={
+                          shift.deltaMs > 0.05
+                            ? "delta-bad"
+                            : shift.deltaMs < -0.05
+                              ? "delta-good"
+                              : undefined
+                        }
+                      >
+                        {formatDelta(shift.deltaMs)}
+                      </span>
+                    </div>
+                  ))}
+                  <div className="ledger-shift-row ledger-shift-total">
+                    <span>完成预算</span>
+                    <span>{formatDuration(baseline.completionMs)}</span>
+                    <span>{formatDuration(comparison.completionMs)}</span>
+                    <span
+                      className={
+                        delta > 0
+                          ? "delta-bad"
+                          : delta < 0
+                            ? "delta-good"
+                            : undefined
+                      }
+                    >
+                      {formatDelta(delta)}
+                    </span>
+                  </div>
+                  <div className="model-footnote">
+                    分项按关键路径节点汇总；执行分项（除资源排队外）合计 =
+                    完成预算。资源排队与槽位前驱执行时段重叠，单列参考。
+                  </div>
+                </>
+              ) : (
+                <div className="ledger-shift-empty">
+                  所选快照保存于账本功能之前，缺少分项明细，仅支持总耗时对比。重新保存方案即可生成账本。
+                </div>
+              )}
             </div>
           )}
           <div className="snapshot-list">
